@@ -1,0 +1,162 @@
+// Desenvolvido por Jaime Luiz Hansen Filho
+
+
+// Se for carregar o código novamente no ESP lembrem de instalar essas bibliotecas abaixo :
+
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#if defined(ESP32)
+  #include <WiFi.h>
+#elif defined(ESP8266)
+  #include <ESP8266WiFi.h>
+#endif
+#include <Firebase_ESP_Client.h>
+#include <WiFiManager.h>  // Inclua a biblioteca do WiFiManager
+
+// Firebase Token Helper
+#include "addons/TokenHelper.h"
+
+// Firebase RTDB Helper
+#include "addons/RTDBHelper.h"
+
+// Configurações do Firebase
+#define API_KEY "AIzaSyCINMd3pjHYZVqnAG9Wx4E9_cTB1q0SXXE"
+#define DATABASE_URL "https://eebcedrense-b6a1d-default-rtdb.firebaseio.com/" 
+
+// Configuração dos pinos e variáveis
+#define sensorPin A0 // Ligar sensor umidade nesse pino do ESP8266
+#define releBomba D0 //Ligar Relé nesse pino do ESP8266
+
+// Aqui são só os valores do sensor e do relé
+int sensorValue = 0;
+int percentValue = 0;
+unsigned long startTime = 0;
+unsigned long elapsedTime = 0;
+bool bombaAcionada = false; // indica se a bomba foi acionada pra somar os segundos
+
+
+
+// Configuração do display I2C (endereço 0x27 e tamanho 16x2)
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+// Configurações do Firebase
+FirebaseData fbdo;
+FirebaseAuth auth;
+FirebaseConfig config;
+
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(releBomba, OUTPUT);
+  digitalWrite(releBomba, HIGH);
+  lcd.init();
+  lcd.backlight();
+  lcd.setCursor(0, 0);
+  lcd.print("Umidade: ");
+
+  // Iniciando o WiFiManager
+  WiFiManager wifiManager;
+  // Se não houver Wi-Fi configurado, WiFiManager entrará no modo AP para configuração
+  if (!wifiManager.autoConnect("BombaConfigAP", "password123")) {
+    Serial.println("Falha ao conectar e nenhum timeout definido.");
+    ESP.restart(); // Reinicia se falhar na conexão
+  }
+  Serial.println("Conectado ao Wi-Fi!");
+
+  // Configurando Firebase
+  config.api_key = API_KEY;
+  config.database_url = DATABASE_URL;
+  
+  if (Firebase.signUp(&config, &auth, "", "")) {
+    Serial.println("Registro no Firebase realizado com sucesso.");
+  } else {
+    Serial.printf("Erro no registro: %s\n", config.signer.signupError.message.c_str());
+  }
+  
+  config.token_status_callback = tokenStatusCallback;
+  Firebase.begin(&config, &auth);
+  Firebase.reconnectWiFi(true);
+}
+
+void loop() {
+  // Leitura do sensor de umidade
+  sensorValue = analogRead(sensorPin);
+  percentValue = map(sensorValue, 350, 1023, 100, 0); // Alterar aqui a porcentagem da leitura do sensor 350 é o minimo e 1023 é o maximo, ** Não mexer no outros valores **
+
+  // Exibição no display LCD
+  lcd.setCursor(10, 0);
+  lcd.print(percentValue);
+  lcd.print("%   ");
+
+  // Controle da bomba e exibição no display
+  if (percentValue < 40) {  // 40% é o minimo pra ligar ligar a boma Alterem se precisar ligar antes ou depois
+    if (!bombaAcionada) {
+      startTime = millis();
+      bombaAcionada = true;
+      updatePumpState(0);  // Atualiza o estado da bomba para ligado (0)
+    }
+    digitalWrite(releBomba, LOW);
+    elapsedTime = (millis() - startTime) / 1000;
+    lcd.setCursor(0, 1);
+    lcd.print("Bomba acionada ");   
+  } else {
+    if (bombaAcionada) {
+      bombaAcionada = false;
+      digitalWrite(releBomba, HIGH);
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("Bomba ligada por:");
+      lcd.setCursor(0, 1);
+      lcd.print(elapsedTime);
+      lcd.print(" seg");
+
+      // Adiciona o tempo decorrido ao Firebase
+      updatePumpTime(elapsedTime);
+      updatePumpState(1);  // Atualiza o estado da bomba para desligado (1)
+
+      delay(3000);
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("Umidade: ");
+    }
+  }
+
+  // Envio dos dados para o Firebase
+  if (Firebase.ready()) {
+    if (Firebase.RTDB.setInt(&fbdo, "/sensor/soil_moisture", percentValue)) {
+      Serial.println("Dados de umidade enviados com sucesso.");
+    } else {
+      Serial.println("Falha ao enviar dados de umidade: " + fbdo.errorReason());
+    }
+  }
+
+  delay(1000);
+}
+
+void updatePumpTime(unsigned long elapsedTime) {
+  // Leitura do tempo atual no Firebase
+  if (Firebase.RTDB.getInt(&fbdo, "/releBomba/acionadoSeg")) {
+    int totalTime = fbdo.intData();
+    
+    // Soma o tempo atual com o novo tempo
+    totalTime += elapsedTime;
+    
+    // Atualiza o tempo total no Firebase
+    if (Firebase.RTDB.setInt(&fbdo, "/releBomba/acionadoSeg", totalTime)) {
+      Serial.println("Tempo da bomba atualizado no Firebase.");
+    } else {
+      Serial.println("Falha ao atualizar o tempo no Firebase: " + fbdo.errorReason());
+    }
+  } else {
+    Serial.println("Falha ao ler o tempo atual: " + fbdo.errorReason());
+  }
+}
+
+void updatePumpState(int state) {
+  // Atualiza o estado da bomba no Firebase
+  if (Firebase.RTDB.setInt(&fbdo, "/releBomba/state", state)) {
+    Serial.println("Estado da bomba atualizado no Firebase.");
+  } else {
+    Serial.println("Falha ao atualizar o estado da bomba no Firebase: " + fbdo.errorReason());
+  }
+}
